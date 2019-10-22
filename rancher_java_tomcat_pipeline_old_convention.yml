@@ -1,0 +1,893 @@
+---
+resource_types:
+  - name: http-api
+    type: docker-image
+    source:
+      repository: aequitas/http-api-resource
+      tag: latest
+
+  - name: kubernetes
+    type: docker-image
+    source:
+      repository: zlabjp/kubernetes-resource
+      tag: 1.13
+
+resources:
+  - name: wrapper_success_deploy-develop
+    type: http-api
+    source:
+      uri: ((callback_url_success))&job=deploy-develop
+      method: POST
+
+  - name: wrapper_fail_deploy-develop
+    type: http-api
+    source:
+      uri: ((callback_url_fail))&job=deploy-develop
+      method: POST
+
+  - name: wrapper_success_stg-merge
+    type: http-api
+    source:
+      uri: ((callback_url_success))&job=stg-merge
+      method: POST
+
+  - name: wrapper_fail_stg-merge
+    type: http-api
+    source:
+      uri: ((callback_url_fail))&job=stg-merge
+      method: POST
+
+  - name: wrapper_success_pass-stg
+    type: http-api
+    source:
+      uri: ((callback_url_success))&job=pass-stg
+      method: POST
+
+  - name: wrapper_fail_pass-stg
+    type: http-api
+    source:
+      uri: ((callback_url_fail))&job=pass-stg
+      method: POST
+
+  - name: wrapper_success_close
+    type: http-api
+    source:
+      uri: ((callback_url_success))&job=close
+      method: POST
+
+  - name: wrapper_fail_close
+    type: http-api
+    source:
+      uri: ((callback_url_fail))&job=close
+      method: POST
+
+  - name: wrapper_success_roll-back
+    type: http-api
+    source:
+      uri: ((callback_url_success))&job=roll-back
+      method: POST
+
+  - name: wrapper_fail_roll-back
+    type: http-api
+    source:
+      uri: ((callback_url_fail))&job=roll-back
+      method: POST
+
+  - name: docker-registry-dev
+    type: docker-image
+    source:
+      repository: ((docker_harbor_repo))/((image_project_dev))/((wrapper-group-name))-((wrapper-project-code))
+      tag: ((ticket-version))
+      insecure_registries: ((insecure_registries))
+      username: ((docker_harbor_username))
+      password: ((docker_harbor_password))
+
+  - name: docker-registry-rel
+    type: docker-image
+    source:
+      repository: ((docker_harbor_repo))/((image_project_rel))/((wrapper-group-name))-((wrapper-project-code))
+      tag: ((ticket-version))
+      insecure_registries: ((insecure_registries))
+      username: ((docker_harbor_username))
+      password: ((docker_harbor_password))
+
+#  - name: docker-registry-rollback
+#    type: docker-image
+#    source:
+#      repository: ((docker_harbor_repo))/((image_project_rel))/((wrapper-group-name))-((wrapper-project-code))
+#      tag: ((rollback_version))
+#      insecure_registries: ((insecure_registries))
+#      username: ((docker_harbor_username))
+#      password: ((docker_harbor_password))
+
+  - name: kubernetes-config
+    type: git
+    source:
+      uri: ((kubernetes_config_git_url))
+      branch: master
+      private_key: ((github-private-key))
+    check_every: 10s # for demo
+
+  - name: mvnw
+    type: git
+    source:
+      uri: ((mvnw_git_url))
+      branch: master
+      private_key: ((github-private-key))
+    check_every: 10s # for demo
+
+  - name: ((developer_git_branch))
+    type: git
+    source:
+      uri: ((git-address))
+      branch: ((developer_git_branch))
+      private_key: ((github-private-key))
+    check_every: 10s # for demo
+
+  - name: repo-release
+    type: git
+    source:
+      uri: ((git-address))
+      branch: release
+      private_key: ((github-private-key))
+
+  - name: repo-master
+    type: git
+    source:
+      uri: ((git-address))
+      branch: master
+      private_key: ((github-private-key))
+
+  - name: kubernetes-dev
+    type: kubernetes
+    source:
+      server: ((kubernetes_server_url_dev))
+      namespace: dev
+      token: ((kubernetes_token_dev))
+      certificate_authority: ((kubernetes_cert_dev))
+
+  - name: kubernetes-stg
+    type: kubernetes
+    source:
+      server: ((kubernetes_server_url_stg))
+      namespace: stg
+      token: ((kubernetes_token_stg))
+      certificate_authority: ((kubernetes_cert_stg))
+
+  - name: kubernetes-prod
+    type: kubernetes
+    source:
+      server: ((kubernetes_server_url_prod))
+      namespace: prod
+      token: ((kubernetes_token_prod))
+      certificate_authority: ((kubernetes_cert_prod))
+
+  - name: m2
+    type: docker-image
+    source:
+      repository: making/m2
+    check_every: 10s # for demo
+
+jobs:
+
+  - name: develop-build-img
+    serial: true
+    public: true
+    plan:
+      - aggregate:
+        - get: m2
+        - get: mvnw
+        - get: kubernetes-config
+        - get: ((developer_git_branch))
+          trigger: true
+      - task: build-img
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: java
+              tag: 8-jdk-alpine
+          inputs:
+            - name: ((developer_git_branch))
+            - name: m2
+            - name: mvnw
+            - name: kubernetes-config
+          outputs:
+            - name: output
+          params:
+            group: ((wrapper-group-name))
+            repo: ((developer_git_branch))
+            code: ((wrapper-project-code))
+            version: ((ticket-version))
+          run:
+            path: /bin/sh
+            args:
+              - -c
+              - |
+                ls -al
+                cp -a mvnw/* ./$repo
+                cp -a mvnw/.mvn ./$repo/
+                cd $repo
+                ./mvnw install -Dmaven.test.skip=true -Dmaven.repo.local=../m2/rootfs/opt/m2
+                mv target/*.jar ../output/app.jar
+                cp Dockerfile ../output/Dockerfile
+      - put: docker-registry-dev
+        params:
+          build: output/
+
+  - name: deploy-develop
+    serial: true
+    public: false
+    plan:
+      - aggregate:
+        - get: docker-registry-dev
+          resource: docker-registry-dev
+          passed: [ develop-build-img ]
+          trigger: true
+        - get: repo
+          resource: ((developer_git_branch))
+        - get: kubernetes_config
+          resource: kubernetes-config
+      - task: make-config
+        config:
+          platform: linux
+          inputs:
+            - name: from
+              path: kubernetes_config
+          outputs:
+            - name: out
+          image_resource:
+            type: docker-image
+            source:
+              repository: getourneau/alpine-bash-git
+          run:
+            path: /bin/bash
+            args:
+              - -c
+              - |
+                ls -al
+                cd kubernetes_config
+                ls -al
+                cat test-java-deployment.yml
+                cat test-java-deployment.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_ticket_number"'/g' \
+                | sed 's/REGISTRY_NAME/'"$registry_name"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-deployment-tmp.yml
+                cat test-java-deployment-tmp.yml
+                mv test-java-deployment-tmp.yml ../out/dev-java-deployment.yml
+                cat test-java-svc.yml
+                cat test-java-svc.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_ticket_number"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' \
+                | sed 's/NS/'"dev"'/g' > test-java-svc-tmp.yml
+                cat test-java-svc-tmp.yml
+                mv test-java-svc-tmp.yml ../out/dev-java-svc.yml
+                cat test-java-ingress.yml
+                cat test-java-ingress.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_ticket_number"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-ingress-tmp.yml
+                cat test-java-ingress-tmp.yml
+                mv test-java-ingress-tmp.yml ../out/dev-java-ingress.yml
+                cd ..
+                cd out
+                ls -al
+                pwd
+                cat dev-java-deployment.yml
+                cat dev-java-svc.yml
+                cat dev-java-ingress.yml
+        input_mapping: { from: kubernetes_config }
+        params:
+          group_name_project_code: ((wrapper-group-name))-((wrapper-project-code))
+          group_name_ticket_number: ((wrapper-group-name))-((wrapper-ticket-number))
+          registry_name: ((docker_harbor_repo))
+          image_project: ((image_project_dev))
+          image_name: ((wrapper-group-name))-((wrapper-project-code))
+          image_tag: ((ticket-version))
+          wrapper-group-name: ((wrapper-group-name))
+          wrapper-project-code: ((wrapper-project-code))
+          wrapper-ticket-number: ((wrapper-ticket-number))
+      - put: kubernetes-dev
+        params:
+          kubectl: apply -f out/
+        on_success:
+          put: wrapper_success_deploy-develop
+        on_failure:
+          put: wrapper_fail_deploy-develop
+
+  - name: stg-merge
+    serial: true
+    public: true
+    plan:
+      - aggregate:
+        - get: kubernetes-dev
+          passed: [ deploy-develop ]
+          trigger: false
+        - get: repo
+          resource: ((developer_git_branch))
+
+  - name: merge-dev-to-release
+    public: true
+    plan:
+      - aggregate:
+        - get: repo
+          resource: ((developer_git_branch))
+          passed: [ stg-merge ]
+          trigger: true
+        - get: repo-release
+          resource: repo-release
+      - task: merge-dev-to-release
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: getourneau/alpine-bash-git
+          inputs:
+            - name: from
+              path: repo
+            - name: to
+              path: repo-target
+          outputs:
+            - name: out
+          run:
+            path: /bin/bash
+            args:
+              - -c
+              - |
+                if [ "$DEBUG" = "true" ]; then
+                set -x
+                fi
+                git config --global user.email "${GIT_EMAIL}"
+                git config --global user.name "${GIT_NAME}"
+                cd out
+                shopt -s dotglob
+                rm -rf *
+                mv -f ../repo/* ./
+                GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no" git remote add -f repo-target ../repo-target
+                git merge -s ours "repo-target/release" -m "$group-$code-$version merge to release"
+        input_mapping: { from: repo, to: repo-release}
+        params:
+          GIT_EMAIL: ((git-email))
+          GIT_NAME: ((git-name))
+          group: ((wrapper-group-name))
+          code: ((wrapper-project-code))
+          version: ((ticket-version))
+      - put: repo
+        resource: repo-release
+        params:
+          repository: out
+        on_failure:
+          put: wrapper_fail_stg-merge
+
+  - name: test-stg
+    serial: true
+    public: true
+    plan:
+      - aggregate:
+        - get: repo
+          resource: repo-release
+          passed: [ merge-dev-to-release ]
+          trigger: true
+        - get: m2
+        - get: mvnw
+      - task: unit
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: java
+              tag: 8-jdk-alpine
+          inputs:
+            - name: repo
+            - name: m2
+            - name: mvnw
+          params:
+            nexus_id: ((nexus_id))
+            nexus_pwd: ((nexus_pw))
+          run:
+            path: /bin/sh
+            args:
+              - -c
+              - |
+                cp -a mvnw/* ./repo/
+                cp -a mvnw/.mvn ./repo/
+                cd repo
+                cat << EOF >> settings.xml
+                <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                                      https://maven.apache.org/xsd/settings-1.0.0.xsd">
+                  <servers>
+                    <server>
+                      <id>nexus</id>
+                      <username>$nexus_id</username>
+                      <password>$nexus_pw</password>
+                    </server>
+                    <server>
+                      <id>nexus-snapshots</id>
+                      <username>$nexus_id</username>
+                      <password>$nexus_pw</password>
+                    </server>
+                  </servers>
+                  <mirrors>
+                    <mirror>
+                    <id>central</id>
+                    <url>http://lib.mzdev.kr/repository/maven-central/</url>
+                    <mirrorOf>central</mirrorOf>
+                  </mirror>
+                  </mirrors>
+                     <profiles>
+                       <profile>
+                         <id>nexus</id>
+                         <repositories>
+                           <repository>
+                             <id>devops</id>
+                             <url>http://lib.mzdev.kr/repository/devops-public/</url>
+                           </repository>
+                         </repositories>
+                       </profile>
+                     </profiles>
+
+                     <activeProfiles>
+                       <activeProfile>nexus</activeProfile>
+                     </activeProfiles>
+                </settings>
+                EOF
+                ./mvnw --settings settings.xml test -Dmaven.test.skip=true -Dmaven.repo.local=../m2/rootfs/opt/m2
+        on_failure:
+          put: wrapper_fail_stg-merge
+
+  - name: release-build-img
+    serial: true
+    public: true
+    plan:
+      - aggregate:
+        - get: m2
+        - get: mvnw
+        - get: kubernetes-config
+        - get: repo-release
+          passed: [ test-stg ]
+          trigger: true
+      - task: build-img
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: java
+              tag: 8-jdk-alpine
+          inputs:
+            - name: repo-release
+            - name: m2
+            - name: mvnw
+            - name: kubernetes-config
+          outputs:
+            - name: output
+          params:
+            group: ((wrapper-group-name))
+            repo: repo-release
+            code: ((wrapper-project-code))
+            version: ((ticket-version))
+          run:
+            path: /bin/sh
+            args:
+              - -c
+              - |
+                ls -al
+                cp -a mvnw/* ./$repo
+                cp -a mvnw/.mvn ./$repo/
+                cd $repo
+                ./mvnw install -Dmaven.test.skip=true -Dmaven.repo.local=../m2/rootfs/opt/m2
+                mv target/*.jar ../output/app.jar
+                cp Dockerfile ../output/Dockerfile
+                ls -al ../output
+        on_failure:
+          put: wrapper_fail_stg-merge
+      - put: docker-registry-rel
+        params:
+          build: output/
+        on_failure:
+          put: wrapper_fail_stg-merge
+
+  - name: deploy-stg
+    serial: true
+    public: false
+    plan:
+      - aggregate:
+        - get: docker-registry-rel
+          resource: docker-registry-rel
+          passed: [ release-build-img ]
+          trigger: true
+        - get: repo
+          resource: ((developer_git_branch))
+        - get: kubernetes_config
+          resource: kubernetes-config
+      - task: make-config
+        config:
+          platform: linux
+          inputs:
+            - name: from
+              path: kubernetes_config
+          outputs:
+            - name: out
+          image_resource:
+            type: docker-image
+            source:
+              repository: getourneau/alpine-bash-git
+          run:
+            path: /bin/bash
+            args:
+              - -c
+              - |
+                ls -al
+                cd kubernetes_config
+                cat test-java-deployment.yml
+                cat test-java-deployment.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_ticket_number"'/g' \
+                | sed 's/REGISTRY_NAME/'"$registry_name"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-deployment-tmp.yml
+                cat test-java-deployment-tmp.yml
+                mv test-java-deployment-tmp.yml ../out/stg-java-deployment.yml
+                cat test-java-svc.yml
+                cat test-java-svc.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_project_code"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' \
+                | sed 's/NS/'"stg"'/g' > test-java-svc-tmp.yml
+                cat test-java-svc-tmp.yml
+                mv test-java-svc-tmp.yml ../out/stg-java-svc.yml
+                cat test-java-ingress.yml
+                cat test-java-ingress.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_project_code"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-ingress-tmp.yml
+                cat test-java-ingress-tmp.yml
+                mv test-java-ingress-tmp.yml ../out/stg-java-ingress.yml
+                cd ..
+                cd out
+                ls -al
+                pwd
+                cat stg-java-deployment.yml
+                cat stg-java-svc.yml
+                cat stg-java-ingress.yml
+        params:
+          group_name_project_code: ((wrapper-group-name))-((wrapper-project-code))
+          group_name_ticket_number: ((wrapper-group-name))-((wrapper-ticket-number))
+          registry_name: ((docker_harbor_repo))
+          image_project: ((image_project_rel))
+          image_name: ((wrapper-group-name))-((wrapper-project-code))
+          image_tag: ((ticket-version))
+          wrapper-group-name: ((wrapper-group-name))
+          wrapper-project-code: ((wrapper-project-code))
+          wrapper-ticket-number: ((wrapper-ticket-number))
+        input_mapping: { from: kubernetes_config }
+      - put: kubernetes-stg
+        params:
+          kubectl: apply -f out/
+        on_success:
+          put: wrapper_success_stg-merge
+        on_failure:
+          put: wrapper_fail_stg-merge
+
+  - name: pass-stg
+    serial: true
+    public: true
+    plan:
+      - aggregate:
+        - get: repo
+          resource: repo-release
+        - get: kubernetes-stg
+          passed: [ deploy-stg ]
+          trigger: false
+
+  - name: deploy-prod
+    serial: true
+    public: false
+    plan:
+      - aggregate:
+        - get: repo
+          resource: repo-release
+          trigger: true
+          passed: [ pass-stg ]
+        - get: registry
+          resource: docker-registry-rel
+        - get: kubernetes_config
+          resource: kubernetes-config
+      - task: make-config
+        config:
+          platform: linux
+          inputs:
+            - name: from
+              path: kubernetes_config
+          outputs:
+            - name: out
+          image_resource:
+            type: docker-image
+            source:
+              repository: getourneau/alpine-bash-git
+          run:
+            path: /bin/bash
+            args:
+              - -c
+              - |
+                ls -al
+                cd kubernetes_config
+                cat test-java-deployment.yml
+                cat test-java-deployment.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_ticket_number"'/g' \
+                | sed 's/REGISTRY_NAME/'"$registry_name"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-deployment-tmp.yml
+                cat test-java-deployment-tmp.yml
+                mv test-java-deployment-tmp.yml ../out/prod-java-deployment.yml
+                cat test-java-svc.yml
+                cat test-java-svc.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_project_code"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' \
+                | sed 's/NS/'"prod"'/g' > test-java-svc-tmp.yml
+                cat test-java-svc-tmp.yml
+                mv test-java-svc-tmp.yml ../out/prod-java-svc.yml
+                cat test-java-ingress.yml
+                cat test-java-ingress.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_project_code"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-ingress-tmp.yml
+                cat test-java-ingress-tmp.yml
+                mv test-java-ingress-tmp.yml ../out/prod-java-ingress.yml
+                cd ..
+                cd out
+                ls -al
+                pwd
+                cat prod-java-deployment.yml
+                cat prod-java-svc.yml
+                cat prod-java-ingress.yml
+        input_mapping: { from: kubernetes_config }
+        params:
+          group_name_project_code: ((wrapper-group-name))-((wrapper-project-code))
+          group_name_ticket_number: ((wrapper-group-name))-((wrapper-ticket-number))
+          registry_name: ((docker_harbor_repo))
+          image_project: ((image_project_rel))
+          image_name: ((wrapper-group-name))-((wrapper-project-code))
+          image_tag: ((ticket-version))
+          wrapper-group-name: ((wrapper-group-name))
+          wrapper-project-code: ((wrapper-project-code))
+          wrapper-ticket-number: ((wrapper-ticket-number))
+      - put: kubernetes-prod
+        params:
+          kubectl: apply -f out/
+        on_success:
+          put: wrapper_success_pass-stg
+        on_failure:
+          put: wrapper_fail_pass-stg
+
+  - name: roll-back
+    serial: true
+    public: true
+    plan:
+      - aggregate:
+        - get: repo
+          resource: repo-release
+        - get: kubernetes-config
+#        - get: docker-registry-rollback
+#          resource: docker-registry-rollback
+        - get: kubernetes-prod
+          passed: [ deploy-prod ]
+          trigger: false
+      - task: make-config
+        config:
+          platform: linux
+          inputs:
+            - name: kubernetes-config
+          outputs:
+            - name: out
+          image_resource:
+            type: docker-image
+            source:
+              repository: getourneau/alpine-bash-git
+          run:
+            path: /bin/bash
+            args:
+              - -c
+              - |
+                cd kubernetes-config
+                cp -a test-java-deployment.yml rollback-java-deployment.yml
+                ls -al
+                cat test-java-deployment.yml
+                cat test-java-deployment.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_ticket_number"'/g' \
+                | sed 's/REGISTRY_NAME/'"$registry_name"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-deployment-tmp.yml
+                cat test-java-deployment-tmp.yml
+                mv test-java-deployment-tmp.yml ../out/rollback-java-deployment.yml
+                cat test-java-svc.yml
+                cat test-java-svc.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_project_code"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' \
+                | sed 's/NS/'"prod"'/g' > test-java-svc-tmp.yml
+                cat test-java-svc-tmp.yml
+                mv test-java-svc-tmp.yml ../out/rollback-java-svc.yml
+                cat test-java-ingress.yml
+                cat test-java-ingress.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_project_code"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-ingress-tmp.yml
+                cat test-java-ingress-tmp.yml
+                mv test-java-ingress-tmp.yml ../out/rollback-java-ingress.yml
+                cd ..
+                cd out
+                ls -al
+                pwd
+                cat rollback-java-deployment.yml
+                cat rollback-java-svc.yml
+                cat rollback-java-ingress.yml
+        params:
+          group_name_project_code: ((wrapper-group-name))-((wrapper-project-code))
+          group_name_ticket_number: ((wrapper-group-name))-((wrapper-ticket-number))
+          registry_name: ((docker_harbor_repo))
+          image_project: ((image_project_rel))
+          image_name: ((wrapper-group-name))-((wrapper-project-code))
+          image_tag: ((ticket-version))
+          wrapper-group-name: ((wrapper-group-name))
+          wrapper-project-code: ((wrapper-project-code))
+          wrapper-ticket-number: ((wrapper-ticket-number))
+      - put: kubernetes-prod
+        params:
+          kubectl: delete -f out/
+        on_failure:
+          put: wrapper_fail_roll-back
+      - task: make-rollback-config
+        config:
+          platform: linux
+          inputs:
+            - name: kubernetes-config
+          outputs:
+            - name: out
+          image_resource:
+            type: docker-image
+            source:
+              repository: getourneau/alpine-bash-git
+          run:
+            path: /bin/bash
+            args:
+              - -c
+              - |
+                cd kubernetes-config
+                cp -a test-java-deployment.yml rollback-java-deployment.yml
+                ls -al
+                cat test-java-deployment.yml
+                cat test-java-deployment.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_ticket_number"'/g' \
+                | sed 's/REGISTRY_NAME/'"$registry_name"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-deployment-tmp.yml
+                cat test-java-deployment-tmp.yml
+                mv test-java-deployment-tmp.yml ../out/rollback-java-deployment.yml
+                cat test-java-svc.yml
+                cat test-java-svc.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-PRJ-COD/'"$group_name_project_code"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_project_code"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' \
+                | sed 's/NS/'"prod"'/g' > test-java-svc-tmp.yml
+                cat test-java-svc-tmp.yml
+                mv test-java-svc-tmp.yml ../out/rollback-java-svc.yml
+                cat test-java-ingress.yml
+                cat test-java-ingress.yml | sed 's/IMAGE_PROJECT/'"$image_project"'/g' \
+                | sed 's/GRP-NAME-TKT-NUM/'"$group_name_project_code"'/g' \
+                | sed 's/IMAGE_NAME/'"$image_name"'/g' \
+                | sed 's/IMAGE_TAG/'"$image_tag"'/g' > test-java-ingress-tmp.yml
+                cat test-java-ingress-tmp.yml
+                mv test-java-ingress-tmp.yml ../out/rollback-java-ingress.yml
+                cd ..
+                cd out
+                ls -al
+                pwd
+                cat rollback-java-deployment.yml
+                cat rollback-java-svc.yml
+                cat rollback-java-ingress.yml
+        params:
+          group_name_project_code: ((wrapper-group-name))-((wrapper-project-code))
+          group_name_ticket_number: ((wrapper-group-name))-((wrapper-ticket-number))
+          registry_name: ((docker_harbor_repo))
+          image_project: ((image_project_rel))
+          image_name: ((wrapper-group-name))-((wrapper-project-code))
+          image_tag: ((rollback_version))
+#          rollback_tag: ((rollback_version))
+          wrapper-group-name: ((wrapper-group-name))
+          wrapper-project-code: ((wrapper-project-code))
+          wrapper-ticket-number: ((wrapper-ticket-number))
+      - put: kubernetes-prod
+        params:
+          kubectl: apply -f out/
+        on_success:
+          put: wrapper_success_roll-back
+        on_failure:
+          put: wrapper_fail_roll-back
+
+  - name: close
+    serial: true
+    public: true
+    plan:
+      - aggregate:
+        - get: repo
+          resource: repo-release
+        - get: kubernetes-prod
+          passed: [ deploy-prod ]
+          trigger: false
+
+  - name: merge-release-to-master
+    public: true
+    plan:
+      - aggregate:
+        - get: repo
+          resource: repo-release
+          passed: [ close ]
+          trigger: true
+        - get: repo-master
+          resource: repo-master
+      - task: merge-release-to-master
+        config:
+          platform: linux
+          image_resource:
+            type: docker-image
+            source:
+              repository: getourneau/alpine-bash-git
+          inputs:
+            - name: from
+              path: repo
+            - name: to
+              path: repo-target
+          outputs:
+            - name: out
+          run:
+            path: /bin/bash
+            args:
+              - -c
+              - |
+                if [ "$DEBUG" = "true" ]; then
+                set -x
+                fi
+                git config --global user.email "${GIT_EMAIL}"
+                git config --global user.name "${GIT_NAME}"
+                cd out
+                shopt -s dotglob
+                rm -rf *
+                mv -f ../repo/* ./
+                GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no" git remote add -f repo-target ../repo-target
+                git merge --ff "repo-target/master" -m "$group-$code-$version-release merge to master"
+                git tag $version
+        input_mapping: { from: repo, to: repo-master }
+        params:
+          GIT_EMAIL: ((git-email))
+          GIT_NAME: ((git-name))
+          version: ((ticket-version))
+          group: ((wrapper-group-name))
+          code: ((wrapper-project-code))
+        on_failure:
+          put: wrapper_fail_close
+      - put: repo
+        resource: repo-master
+        params:
+          repository: out
+        on_success:
+          put: wrapper_success_close
+        on_failure:
+          put: wrapper_fail_close
